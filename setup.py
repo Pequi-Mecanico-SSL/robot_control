@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'controller = robot_control.controller:main',
+            'stm32_bridge = robot_control.stm32_bridge:main',
         ],
     },
 )
