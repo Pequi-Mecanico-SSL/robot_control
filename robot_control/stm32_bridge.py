@@ -4,6 +4,15 @@ from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 import spidev
 import struct
+from threading import Lock
+
+def to_byte_list(data):
+    tx_bytes = struct.pack('ffff', *data)
+    return list(tx_bytes)
+
+def from_byte_list(data):
+    rx_bytes = bytes(data)
+    return list(struct.unpack('ffff', rx_bytes))
 
 class Stm32Bridge(Node):
     def __init__(self):
@@ -18,25 +27,36 @@ class Stm32Bridge(Node):
             Float32MultiArray,
             'encoder_values',
             10)
+        self.spi_lock = Lock()
         self.spi = spidev.SpiDev()
         self.spi.open(0, 0)
         self.spi.max_speed_hz = 100000
-    
-    def motor_commands_callback(self, msg):
-        self.get_logger().info(f'Received motor commands: {msg.data}')
+        self.last_encoder_published_time = self.get_clock().now()
+        self.encoder_publish_timer = self.create_timer(0.1, self.publish_encoder_values_callback)
 
-        tx_bytes = struct.pack('<{}f'.format(len(msg.data)), *msg.data)
-        rx_list = self.spi.xfer2(list(tx_bytes))
-        rx_bytes = bytes(rx_list)
-        rx_values = struct.unpack('<{}f'.format(msg.data), rx_bytes)
-       
-        self.get_logger().info(f'Received encoder values: {rx_values}')
-
-        # publish the encoder values
+    def publish_encoder_values(self, byte_list):
         msg = Float32MultiArray()
-        msg.data = rx_values
+        encoder_values = from_byte_list(byte_list)
+        msg.data = encoder_values
+        self.last_encoder_published_time = self.get_clock().now()
         self.publisher.publish(msg)
-        self.get_logger().info(f'Published encoder values: {msg.data}')
+
+    def motor_commands_callback(self, msg):
+        cmd_list = [float(x) for x in msg.data][:4] # Limit to 4 commands
+        tx_byte_list = to_byte_list(cmd_list)
+        with self.spi_lock:
+            rx_byte_list = self.spi.xfer2(tx_byte_list)
+        self.publish_encoder_values(rx_byte_list)
+
+    def publish_encoder_values_callback(self):
+        now = self.get_clock().now()
+        time_since_last_publish = (now - self.last_encoder_published_time).nanoseconds / 1e9
+        if time_since_last_publish > 0.1:
+            null_cmd_list = [-1.0, -1.0, -1.0, -1.0]  # Dummy command to trigger encoder read
+            null_cmd_byte_list = to_byte_list(null_cmd_list)
+            with self.spi_lock:
+                rx_byte_list = self.spi.xfer2(null_cmd_byte_list)
+            self.publish_encoder_values(rx_byte_list)
 
 def main(args=None):
     rclpy.init(args=args)
