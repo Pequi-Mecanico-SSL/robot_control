@@ -1,0 +1,11 @@
+launch:
+
+- node:
+    pkg: "robot_control"
+    exec: "stm32_bridge"
+    name: "stm32_bridge"
+
+- node:
+    pkg: "robot_control"
+    exec: "imu"
+    name: "imu"
