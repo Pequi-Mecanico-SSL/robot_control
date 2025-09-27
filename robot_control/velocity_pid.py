@@ -31,17 +31,18 @@ class MimoPidOmni(Node):
         ).value
         self.wheel_orientation = np.array(self.wheel_orientation, dtype=float)
 
-        self.robot_radius = float(self.declare_parameter("robot_radius", 0.09).value)  # [m]
+        # self.robot_radius = float(self.declare_parameter("robot_radius", 0.09).value)  # [m]
+        self.robot_radius = float(self.declare_parameter("robot_radius", 0.175).value)  # [m]
 
         # --------- Useful extra params ----------
-        self.control_rate_hz = float(self.declare_parameter("control_rate_hz", 100.0).value)
-        self.wheel_radius = float(self.declare_parameter("wheel_radius", 0.03).value)  # [m]
-        output_range = float(self.declare_parameter("output_range", 100.0).value)
-        self.output_mid = float(self.declare_parameter("output_mid", 0.0).value)
+        self.control_rate_hz = float(self.declare_parameter("control_rate_hz", 1000.0).value)
+        self.wheel_radius = float(self.declare_parameter("wheel_radius", 0.049/2.0).value)  # [m]
+        output_range = float(self.declare_parameter("output_range", 50.0).value)
+        self.output_mid = float(self.declare_parameter("output_mid", 50.0).value)
         self.max_output = output_range + self.output_mid
 
         # PID gains as 3x3 (MIMO). Defaults are diagonal.
-        kp_default = [1.0, 1.0, 1.0]
+        kp_default = [1.0, 1.0, 0.0]
         ki_default = [0.0, 0.0, 0.0]
         kd_default = [0.0, 0.0, 0.0]
 
@@ -70,19 +71,35 @@ class MimoPidOmni(Node):
         # Assignment matrix
         sin = np.sin(self.wheel_orientation)
         cos = np.cos(self.wheel_orientation)
-        jacobian_wheel_linear_vel = np.column_stack((-sin, cos, np.full_like(sin, self.wheel_radius)))
-        self.jacobian_wheel_ang_vel = jacobian_wheel_linear_vel / self.wheel_radius 
+        jacobian_wheel_linear_vel = np.array([
+            [-sin[0], cos[0], -self.robot_radius],
+            [-sin[1], cos[1], -self.robot_radius],
+            [-sin[2], cos[2], -self.robot_radius],
+            [-sin[3], cos[3], -self.robot_radius],
+        ], dtype=float)
+        self.jacobian_wheel_ang_vel = jacobian_wheel_linear_vel / self.wheel_radius
+
+        # Test
+        cmd = np.array([1.0, 0.0, 0.0])
+        wheel_speeds = self.jacobian_wheel_ang_vel @ cmd
+        self.get_logger().info(f"Test cmd {cmd} -> wheel speeds {wheel_speeds}")
 
         # --------- Topics ----------
         robot_name = f"{self.color}/robot{self.robot_id}"
-        self.sub_current_vel = self.create_subscription(
-            Twist, f"/simulator/velocity/{robot_name}", self.current_vel_callback, 10
-        )
+        #self.sub_current_vel = self.create_subscription(
+        #    Twist, f"/simulator/velocity/{robot_name}", self.current_vel_callback, 10
+        #)
         self.sub_target_vel = self.create_subscription(
             Twist, f"/pid/cmd/velocity/{robot_name}", self.target_vel_callback, 10
         )
         self.pub_pwm = self.create_publisher(
-            Float32MultiArray, f"/simulator/cmd/wheel/{robot_name}", 10
+            Float32MultiArray, f"/motor_commands", 10
+        )
+        self.sub_current_wheel_vel = self.create_subscription(
+            Float32MultiArray, f"/encoder_values", self.current_wheel_vel_callback, 10
+        )
+        self.pub_current_vel_from_wheel = self.create_publisher(
+            Twist, f"/velocity_inferred", 10
         )
 
         # --------- State ----------
@@ -98,11 +115,26 @@ class MimoPidOmni(Node):
     # -------------------- Callbacks --------------------
     def current_vel_callback(self, msg: Twist):
         #self.get_logger().info(f"Vel: [{msg.linear.x:.2f},\t{msg.linear.y:.2f},\t{msg.angular.z:.2f}]")
-        self.current_velocity = np.array([msg.linear.x, msg.linear.y, msg.angular.z], dtype=float)
+        #self.current_velocity = np.array([msg.linear.x, msg.linear.y, msg.angular.z], dtype=float)
+        pass
 
     def target_vel_callback(self, msg: Twist):
-        self.get_logger().info(f"CMD: [{msg.linear.x:.2f},\t{msg.linear.y:.2f},\t{msg.angular.z:.2f}]")
+        #self.get_logger().info(f"CMD: [{msg.linear.x:.2f},\t{msg.linear.y:.2f},\t{msg.angular.z:.2f}]")
         self.target_velocity = np.array([msg.linear.x, msg.linear.y, msg.angular.z], dtype=float)
+    
+    def current_wheel_vel_callback(self, msg: Float32MultiArray):
+        wheel_vels = np.array(msg.data, dtype=float)
+        self.current_velocity = np.linalg.pinv(self.jacobian_wheel_ang_vel) @ wheel_vels
+        # Publish inferred velocity
+        twist = Twist()
+        twist.linear.x = float(self.current_velocity[0])
+        twist.linear.y = float(self.current_velocity[1])
+        twist.angular.z = float(self.current_velocity[2])
+        self.pub_current_vel_from_wheel.publish(twist)
+
+    # Angle wrapping to [-pi, pi]
+    def wrap_angle(self, angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
     # -------------------- Control --------------------
     def pid_loop(self):
@@ -117,6 +149,7 @@ class MimoPidOmni(Node):
         self.last_update = now
 
         error = self.target_velocity - self.current_velocity
+        error[2] = self.wrap_angle(error[2])
 
         # Integrator with clamp (anti-windup)
         self.integrator += error * dt
@@ -138,7 +171,7 @@ class MimoPidOmni(Node):
         # Publish
         msg = Float32MultiArray()
         msg.data = output.astype(np.float32).tolist()
-        self.pub_pwm.publish(msg)
+        # self.pub_pwm.publish(msg)
 
 
 def main(args=None):
